@@ -12,7 +12,9 @@ def init_layers(nn_architecture, seed = 99):
     np.random.seed(seed)
     number_of_layers = len(nn_architecture)
     params_values = {}
-
+    gamma_values = {}
+    beta_values = {}
+    
     for idx, layer in enumerate(nn_architecture):
         layer_idx = idx + 1
         layer_input_size = layer["input_dim"]
@@ -41,7 +43,27 @@ def relu_backward(dA, Z):
     dZ[Z <= 0] = 0;
     return dZ;
 
-def single_layer_forward_propagation(A_prev, W_curr, b_curr, activation="relu"):
+def batch_norm_forward(Z, gamma, beta, epsilon=1e-7):
+    mean = np.mean(Z, axis=1, keepdims=True)
+    variance = np.var(Z, axis=1, keepdims=True)
+    Z_norm = (Z - mean) / np.sqrt(variance + epsilon)
+    Z_tilde = gamma * Z_norm + beta
+    return Z_tilde, Z_norm, mean, variance
+
+def batch_norm_backward(dZ_tilde, Z_norm, mean, variance, gamma, beta, epsilon=1e-7):
+    m = dZ_tilde.shape[1]
+    
+    dZ_norm = dZ_tilde * gamma
+    dvariance = np.sum(dZ_norm * (Z_norm - mean) * (-0.5) * (variance + epsilon)**(-1.5), axis=1, keepdims=True)
+    dmean = np.sum(dZ_norm * (-1 / np.sqrt(variance + epsilon)), axis=1, keepdims=True) + dvariance * np.sum(-2 * (Z_norm - mean), axis=1, keepdims=True) / m
+    dZ = dZ_norm / np.sqrt(variance + epsilon) + dvariance * 2 * (Z_norm - mean) / m + dmean / m
+    
+    dgamma = np.sum(dZ_tilde * Z_norm, axis=1, keepdims=True)
+    dbeta = np.sum(dZ_tilde, axis=1, keepdims=True)
+    
+    return dZ, dgamma, dbeta
+    
+def single_layer_forward_propagation(A_prev, W_curr, b_curr, gamma, beta, activation="relu"):
     Z_curr = np.dot(W_curr, A_prev) + b_curr
     
     if activation is "relu":
@@ -50,10 +72,13 @@ def single_layer_forward_propagation(A_prev, W_curr, b_curr, activation="relu"):
         activation_func = sigmoid
     else:
         raise Exception('Non-supported activation function')
-        
-    return activation_func(Z_curr), Z_curr
 
-def full_forward_propagation(X, params_values, nn_architecture):
+    Z_tilde, Z_norm, mean, variance = batch_norm_forward(Z_curr, gamma, beta)
+    A_curr = activation_func(Z_tilde)
+    
+    return A_curr, Z_norm, mean, variance
+
+def full_forward_propagation(X, params_values, nn_architecture, gamma_values, beta_values):
     memory = {}
     A_curr = X
     
@@ -64,10 +89,15 @@ def full_forward_propagation(X, params_values, nn_architecture):
         activ_function_curr = layer["activation"]
         W_curr = params_values["W" + str(layer_idx)]
         b_curr = params_values["b" + str(layer_idx)]
-        A_curr, Z_curr = single_layer_forward_propagation(A_prev, W_curr, b_curr, activ_function_curr)
+        gamma = gamma_values["gamma" + str(layer_idx)] if "gamma" + str(layer_idx) in gamma_values else None
+        beta = beta_values["beta" + str(layer_idx)] if "beta" + str(layer_idx) in beta_values else None
+        
+        A_curr, Z_norm, mean, variance = single_layer_forward_propagation(A_prev, W_curr, b_curr, gamma, beta, activ_function_curr)
         
         memory["A" + str(idx)] = A_prev
-        memory["Z" + str(layer_idx)] = Z_curr
+        memory["Z" + str(layer_idx)] = Z_norm
+        memory["mean" + str(layer_idx)] = mean
+        memory["variance" + str(layer_idx)] = variance
        
     return A_curr, memory
 
@@ -80,7 +110,7 @@ def get_accuracy_value(Y_hat, Y):
     Y_hat_ = convert_prob_into_class(Y_hat)
     return (Y_hat_ == Y).all(axis=0).mean()
 
-def single_layer_backward_propagation(dA_curr, W_curr, b_curr, Z_curr, A_prev, activation="relu"):
+def single_layer_backward_propagation(dA_curr, W_curr, b_curr, Z_curr, A_prev,  gamma, beta, mean, variance, activation="relu"):
     m = A_prev.shape[1]
     
     if activation is "relu":
@@ -89,15 +119,16 @@ def single_layer_backward_propagation(dA_curr, W_curr, b_curr, Z_curr, A_prev, a
         backward_activation_func = sigmoid_backward
     else:
         raise Exception('Non-supported activation function')
-    
-    dZ_curr = backward_activation_func(dA_curr, Z_curr)
-    dW_curr = np.dot(dZ_curr, A_prev.T) / m
-    db_curr = np.sum(dZ_curr, axis=1, keepdims=True) / m
-    dA_prev = np.dot(W_curr.T, dZ_curr)
 
-    return dA_prev, dW_curr, db_curr
+    dZ_tilde = backward_activation_func(dA_curr, Z_curr)
+    dZ, dgamma, dbeta = batch_norm_backward(dZ_tilde, Z_curr, mean, variance, gamma, beta)
+    dW_curr = np.dot(dZ, A_prev.T) / m
+    db_curr = np.sum(dZ, axis=1, keepdims=True) / m
+    dA_prev = np.dot(W_curr.T, dZ)
 
-def full_backward_propagation(Y_hat, Y, memory, params_values, nn_architecture):
+    return dA_prev, dW_curr, db_curr, dgamma, dbeta
+
+def full_backward_propagation(Y_hat, Y, memory, params_values, nn_architecture,  gamma_values, beta_values):
     grads_values = {}
     m = Y.shape[1]
     Y = Y.reshape(Y_hat.shape)
@@ -111,15 +142,23 @@ def full_backward_propagation(Y_hat, Y, memory, params_values, nn_architecture):
         dA_curr = dA_prev
         
         A_prev = memory["A" + str(layer_idx_prev)]
-        Z_curr = memory["Z" + str(layer_idx_curr)]
+        Z_norm = memory["Z" + str(layer_idx_curr)]
+        mean = memory["mean" + str(layer_idx_curr)]
+        variance = memory["variance" + str(layer_idx_curr)]
+
         W_curr = params_values["W" + str(layer_idx_curr)]
         b_curr = params_values["b" + str(layer_idx_curr)]
+        gamma = gamma_values["gamma" + str(layer_idx_curr)] if "gamma" + str(layer_idx_curr) in gamma_values else None
+        beta = beta_values["beta" + str(layer_idx_curr)] if "beta" + str(layer_idx_curr) in beta_values else None
         
-        dA_prev, dW_curr, db_curr = single_layer_backward_propagation(
-            dA_curr, W_curr, b_curr, Z_curr, A_prev, activ_function_curr)
+        dA_prev, dW_curr, db_curr, dgamma, dbeta = single_layer_backward_propagation(
+            dA_curr, W_curr, b_curr, Z_norm, A_prev, gamma, beta, mean, variance, activ_function_curr)
         
         grads_values["dW" + str(layer_idx_curr)] = dW_curr
         grads_values["db" + str(layer_idx_curr)] = db_curr
+        if gamma is not None:
+            grads_values["dgamma" + str(layer_idx_curr)] = dgamma
+            grads_values["dbeta" + str(layer_idx_curr)] = dbeta
     
     return grads_values
 
