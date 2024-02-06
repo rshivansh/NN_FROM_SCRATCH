@@ -101,16 +101,24 @@ def full_forward_propagation(X, params_values, nn_architecture, gamma_values, be
        
     return A_curr, memory
 
-def get_cost_value(Y_hat, Y):
+def get_cost_value(Y_hat, Y, params_values, lambda_reg):
     m = Y_hat.shape[1]
-    cost = -1 / m * (np.dot(Y, np.log(Y_hat).T) + np.dot(1 - Y, np.log(1 - Y_hat).T))
-    return np.squeeze(cost)
+    cross_entropy_cost = -1 / m * (np.dot(Y, np.log(Y_hat).T) + np.dot(1 - Y, np.log(1 - Y_hat).T))
+    
+    # L2 regularization term
+    l2_regularization = 0
+    for layer_idx in range(1, len(params_values) // 2 + 1):
+        W_curr = params_values['W' + str(layer_idx)]
+        l2_regularization += np.sum(np.square(W_curr))
 
+    cost = cross_entropy_cost + (lambda_reg / (2 * m)) * l2_regularization
+    return np.squeeze(cost)
+    
 def get_accuracy_value(Y_hat, Y):
     Y_hat_ = convert_prob_into_class(Y_hat)
     return (Y_hat_ == Y).all(axis=0).mean()
 
-def single_layer_backward_propagation(dA_curr, W_curr, b_curr, Z_curr, A_prev,  gamma, beta, mean, variance, activation="relu"):
+def single_layer_backward_propagation(dA_curr, W_curr, b_curr, Z_curr, A_prev,  gamma, beta, mean, variance, activation="relu",  lambda_reg=0.):
     m = A_prev.shape[1]
     
     if activation is "relu":
@@ -122,7 +130,10 @@ def single_layer_backward_propagation(dA_curr, W_curr, b_curr, Z_curr, A_prev,  
 
     dZ_tilde = backward_activation_func(dA_curr, Z_curr)
     dZ, dgamma, dbeta = batch_norm_backward(dZ_tilde, Z_curr, mean, variance, gamma, beta)
-    dW_curr = np.dot(dZ, A_prev.T) / m
+    # L2 regularization term gradient
+    dW_reg = (lambda_reg / m) * W_curr
+    
+    dW_curr = np.dot(dZ, A_prev.T) / m + dW_reg
     db_curr = np.sum(dZ, axis=1, keepdims=True) / m
     dA_prev = np.dot(W_curr.T, dZ)
 
