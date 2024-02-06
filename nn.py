@@ -62,8 +62,17 @@ def batch_norm_backward(dZ_tilde, Z_norm, mean, variance, gamma, beta, epsilon=1
     dbeta = np.sum(dZ_tilde, axis=1, keepdims=True)
     
     return dZ, dgamma, dbeta
+
+def dropout_forward(A, keep_prob):
+    dropout_mask = (np.random.rand(*A.shape) < keep_prob) / keep_prob
+    A_dropout = A * dropout_mask
+    return A_dropout, dropout_mask
+
+def dropout_backward(dA_dropout, dropout_mask):
+    dA = dA_dropout * dropout_mask
+    return dA
     
-def single_layer_forward_propagation(A_prev, W_curr, b_curr, gamma, beta, activation="relu"):
+def single_layer_forward_propagation(A_prev, W_curr, b_curr, gamma, beta, activation="relu",  dropout_prob=0.0):
     Z_curr = np.dot(W_curr, A_prev) + b_curr
     
     if activation is "relu":
@@ -75,10 +84,15 @@ def single_layer_forward_propagation(A_prev, W_curr, b_curr, gamma, beta, activa
 
     Z_tilde, Z_norm, mean, variance = batch_norm_forward(Z_curr, gamma, beta)
     A_curr = activation_func(Z_tilde)
-    
+
+    if dropout_prob > 0.0:
+        A_curr, dropout_mask = dropout_forward(A_curr, dropout_prob)
+        # Save dropout mask to memory for backpropagation
+        memory["dropout_mask" + str(layer_idx)] = dropout_mask
+        
     return A_curr, Z_norm, mean, variance
 
-def full_forward_propagation(X, params_values, nn_architecture, gamma_values, beta_values):
+def full_forward_propagation(X, params_values, nn_architecture, gamma_values, beta_values, dropout_prob=0.0):
     memory = {}
     A_curr = X
     
@@ -92,7 +106,7 @@ def full_forward_propagation(X, params_values, nn_architecture, gamma_values, be
         gamma = gamma_values["gamma" + str(layer_idx)] if "gamma" + str(layer_idx) in gamma_values else None
         beta = beta_values["beta" + str(layer_idx)] if "beta" + str(layer_idx) in beta_values else None
         
-        A_curr, Z_norm, mean, variance = single_layer_forward_propagation(A_prev, W_curr, b_curr, gamma, beta, activ_function_curr)
+        A_curr, Z_norm, mean, variance = single_layer_forward_propagation(A_prev, W_curr, b_curr, gamma, beta, activ_function_curr, dropout_prob)
         
         memory["A" + str(idx)] = A_prev
         memory["Z" + str(layer_idx)] = Z_norm
@@ -118,7 +132,7 @@ def get_accuracy_value(Y_hat, Y):
     Y_hat_ = convert_prob_into_class(Y_hat)
     return (Y_hat_ == Y).all(axis=0).mean()
 
-def single_layer_backward_propagation(dA_curr, W_curr, b_curr, Z_curr, A_prev,  gamma, beta, mean, variance, activation="relu",  lambda_reg=0.):
+def single_layer_backward_propagation(dA_curr, W_curr, b_curr, Z_curr, A_prev,  gamma, beta, mean, variance, activation="relu",  lambda_reg=0., dropout_mask=None):
     m = A_prev.shape[1]
     
     if activation is "relu":
@@ -128,6 +142,9 @@ def single_layer_backward_propagation(dA_curr, W_curr, b_curr, Z_curr, A_prev,  
     else:
         raise Exception('Non-supported activation function')
 
+    if dropout_mask is not None:
+        dA_curr = dropout_backward(dA_curr, dropout_mask)
+        
     dZ_tilde = backward_activation_func(dA_curr, Z_curr)
     dZ, dgamma, dbeta = batch_norm_backward(dZ_tilde, Z_curr, mean, variance, gamma, beta)
     # L2 regularization term gradient
@@ -156,6 +173,7 @@ def full_backward_propagation(Y_hat, Y, memory, params_values, nn_architecture, 
         Z_norm = memory["Z" + str(layer_idx_curr)]
         mean = memory["mean" + str(layer_idx_curr)]
         variance = memory["variance" + str(layer_idx_curr)]
+        dropout_mask = memory.get("dropout_mask" + str(layer_idx_curr))
 
         W_curr = params_values["W" + str(layer_idx_curr)]
         b_curr = params_values["b" + str(layer_idx_curr)]
@@ -163,7 +181,7 @@ def full_backward_propagation(Y_hat, Y, memory, params_values, nn_architecture, 
         beta = beta_values["beta" + str(layer_idx_curr)] if "beta" + str(layer_idx_curr) in beta_values else None
         
         dA_prev, dW_curr, db_curr, dgamma, dbeta = single_layer_backward_propagation(
-            dA_curr, W_curr, b_curr, Z_norm, A_prev, gamma, beta, mean, variance, activ_function_curr)
+            dA_curr, W_curr, b_curr, Z_norm, A_prev, gamma, beta, mean, variance, activ_function_curr,dropout_mask)
         
         grads_values["dW" + str(layer_idx_curr)] = dW_curr
         grads_values["db" + str(layer_idx_curr)] = db_curr
